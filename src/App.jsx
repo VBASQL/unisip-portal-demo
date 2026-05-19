@@ -7,6 +7,7 @@ const defaultOption = () => ({
   id: uid(), label: "", action: "Extension (SIP)", target: "", targets: [],
   whisper: "", submenuIntro: "",
   fallbacks: [{ type: "Voicemail", target: "" }],
+  timeRules: [],
   children: [], vmGreeting: "", announcement: "",
 });
 const generatePrompt = (opts) => {
@@ -25,12 +26,12 @@ const GREETINGS = [
 const MENU_OPTIONS = [
   { id: uid(), label: "Orders", action: "Submenu", target: "", targets: [], whisper: "Incoming orders call", submenuIntro: "You've reached our orders department.", fallbacks: [{ type: "Voicemail", target: "" }], vmGreeting: "We would love to speak with you directly, but are busy helping another customer. Please leave your name, number, and order details.", announcement: "",
     children: [
-      { id: uid(), label: "Catskills & summer", action: "Ring group", target: "", targets: ["101","102"], whisper: "Catskills sales", submenuIntro: "", fallbacks: [{ type: "Forward to number", target: "+1 (555) 999-0000" }, { type: "Voicemail", target: "" }], children: [], vmGreeting: "", announcement: "" },
+      { id: uid(), label: "Catskills & summer", action: "Ring group", target: "", targets: ["101","102"], whisper: "Catskills sales", submenuIntro: "", fallbacks: [{ type: "Forward to number", target: "+1 (555) 999-0000" }, { type: "Voicemail", target: "" }], timeRules: [{ id: uid(), label: "Fri early close", days: [5], allDay: false, startTime: "13:00", endTime: "23:59", action: "Forward to number", target: "+1 (555) 999-0000", targets: [] }], children: [], vmGreeting: "", announcement: "" },
       { id: uid(), label: "National sales", action: "Extension (SIP)", target: "103", targets: [], whisper: "", submenuIntro: "", fallbacks: [{ type: "Voicemail", target: "" }], children: [], vmGreeting: "", announcement: "" },
       { id: uid(), label: "Customer support", action: "Forward to number", target: "+1 (718) 555-0199", targets: [], whisper: "Customer support call", submenuIntro: "", fallbacks: [{ type: "Voicemail", target: "" }], children: [], vmGreeting: "", announcement: "" },
     ] },
   { id: uid(), label: "Shipping & receiving", action: "Voicemail", target: "", targets: [], whisper: "", submenuIntro: "", fallbacks: [], vmGreeting: "Dear Driver: We are busy loading shipments. Please leave your name, number, and a message.", announcement: "", children: [] },
-  { id: uid(), label: "Accounts receivable", action: "Extension (SIP)", target: "201", targets: [], whisper: "AR call", submenuIntro: "", fallbacks: [{ type: "Forward to number", target: "+1 (917) 555-1234" }, { type: "Voicemail", target: "" }], vmGreeting: "", announcement: "", children: [] },
+  { id: uid(), label: "Accounts receivable", action: "Extension (SIP)", target: "201", targets: [], whisper: "AR call", submenuIntro: "", fallbacks: [{ type: "Forward to number", target: "+1 (917) 555-1234" }, { type: "Voicemail", target: "" }], timeRules: [{ id: uid(), label: "After hours (weekdays)", days: [1,2,3,4], allDay: false, startTime: "17:00", endTime: "09:00", action: "Forward to number", target: "+1 (917) 555-1234", targets: [] }, { id: uid(), label: "Fri early close", days: [5], allDay: false, startTime: "13:00", endTime: "23:59", action: "Voicemail", target: "", targets: [] }], vmGreeting: "", announcement: "", children: [] },
   { id: uid(), label: "Accounts payable", action: "Extension (SIP)", target: "202", targets: [], whisper: "", submenuIntro: "", fallbacks: [{ type: "Voicemail", target: "" }], vmGreeting: "", announcement: "", children: [] },
   { id: uid(), label: "Hours & addresses", action: "Announcement", target: "", targets: [], whisper: "", submenuIntro: "", fallbacks: [], vmGreeting: "", announcement: "We are located at 626 Whittier Street, Bronx, NY 10474. Hours: 9-5 Mon-Thu, 9-1 Friday.", children: [] },
 ];
@@ -122,6 +123,89 @@ function FallbackChain({ fallbacks, onChange }) {
   );
 }
 
+/* ─── Time Rule Editor ─── */
+const DAYS_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const TIME_PRESETS = [
+  { label: "After hours (weekdays)", days: [1,2,3,4,5], allDay: false, startTime: "17:00", endTime: "09:00" },
+  { label: "Fri early close", days: [5], allDay: false, startTime: "13:00", endTime: "23:59" },
+  { label: "Weekends", days: [0,6], allDay: true, startTime: "", endTime: "" },
+  { label: "Business hours", days: [1,2,3,4,5], allDay: false, startTime: "09:00", endTime: "17:00" },
+];
+
+function TimeRuleEditor({ rules, onChange }) {
+  const add = (preset) => onChange([...rules, {
+    id: uid(), label: preset.label, days: [...preset.days], allDay: preset.allDay,
+    startTime: preset.startTime, endTime: preset.endTime,
+    action: "Forward to number", target: "", targets: [],
+  }]);
+  const addCustom = () => onChange([...rules, {
+    id: uid(), label: "New rule", days: [1,2,3,4,5], allDay: false,
+    startTime: "09:00", endTime: "17:00", action: "Forward to number", target: "", targets: [],
+  }]);
+  const rm = (i) => onChange(rules.filter((_, j) => j !== i));
+  const up = (i, k, v) => { const n = [...rules]; n[i] = { ...n[i], [k]: v }; onChange(n); };
+  const toggleDay = (i, d) => {
+    const r = rules[i];
+    const days = r.days.includes(d) ? r.days.filter(x => x !== d) : [...r.days, d].sort((a, b) => a - b);
+    up(i, 'days', days);
+  };
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: 1, color: C.sub, fontWeight: 600, marginBottom: 4 }}>Time-based routing overrides</div>
+      {rules.length === 0 && (
+        <div style={{ fontSize: 11, color: "#BBB", fontStyle: "italic", marginBottom: 6 }}>No time rules — routing runs 24/7 the same way.</div>
+      )}
+      {rules.map((rule, i) => (
+        <div key={rule.id} style={{ border: `1px solid ${C.amberBd}`, borderRadius: 8, padding: "8px 10px", marginBottom: 6, background: C.amberBg }}>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+            <input value={rule.label} onChange={e => up(i, 'label', e.target.value)} placeholder="Rule name…" style={{ ...S.input, flex: 1, fontSize: 11, fontWeight: 600 }} />
+            <button onClick={() => rm(i)} style={{ ...S.btnTiny, color: C.red }}>✕</button>
+          </div>
+          <div style={{ display: "flex", gap: 3, marginBottom: 6, flexWrap: "wrap" }}>
+            {DAYS_SHORT.map((d, di) => (
+              <button key={di} onClick={() => toggleDay(i, di)} style={{ padding: "2px 7px", fontSize: 10, fontWeight: 600, border: `1px solid ${rule.days.includes(di) ? C.amber : C.border}`, borderRadius: 5, background: rule.days.includes(di) ? C.amber : "#FFF", color: rule.days.includes(di) ? "#FFF" : C.sub, cursor: "pointer", fontFamily: "inherit" }}>{d}</button>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6, flexWrap: "wrap" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, cursor: "pointer" }}>
+              <input type="checkbox" checked={rule.allDay || false} onChange={e => up(i, 'allDay', e.target.checked)} /> All day
+            </label>
+            {!rule.allDay && <>
+              <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <span style={{ fontSize: 10, color: C.sub }}>From</span>
+                <input type="time" value={rule.startTime || ""} onChange={e => up(i, 'startTime', e.target.value)} style={{ ...S.input, fontSize: 11, width: 90 }} />
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <span style={{ fontSize: 10, color: C.sub }}>to</span>
+                <input type="time" value={rule.endTime || ""} onChange={e => up(i, 'endTime', e.target.value)} style={{ ...S.input, fontSize: 11, width: 90 }} />
+              </div>
+            </>}
+          </div>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            <span style={{ fontSize: 10, color: C.sub, fontWeight: 600 }}>→ Route to:</span>
+            <select value={rule.action} onChange={e => up(i, 'action', e.target.value)} style={S.select}>
+              <option>Forward to number</option><option>Voicemail</option><option>Ring extension</option><option>Ring group</option>
+            </select>
+            {(rule.action === "Forward to number" || rule.action === "Ring extension") && (
+              <input value={rule.target || ""} onChange={e => up(i, 'target', e.target.value)} placeholder={rule.action === "Forward to number" ? "+1..." : "ext"} style={{ ...S.input, width: rule.action === "Forward to number" ? 130 : 56, fontSize: 11, fontFamily: "monospace" }} />
+            )}
+            {rule.action === "Ring group" && (
+              <input value={(rule.targets || []).join(", ")} onChange={e => up(i, 'targets', e.target.value.split(",").map(s => s.trim()).filter(Boolean))} placeholder="101, +1555..." style={{ ...S.input, width: 140, fontSize: 11, fontFamily: "monospace" }} />
+            )}
+          </div>
+        </div>
+      ))}
+      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }}>
+        <span style={{ fontSize: 10, color: C.sub }}>Quick add:</span>
+        {TIME_PRESETS.map((p, pi) => (
+          <button key={pi} onClick={() => add(p)} style={{ ...S.btnSm, fontSize: 10, borderColor: C.amberBd, color: C.amber }}>+ {p.label}</button>
+        ))}
+        <button onClick={addCustom} style={{ ...S.btnSm, fontSize: 10 }}>+ Custom rule</button>
+      </div>
+    </div>
+  );
+}
+
 /* ─── Option Editor (recursive) ─── */
 function OptionEditor({ option, index, depth, onChange, onRemove, onMoveUp, onMoveDown, isFirst, isLast, onPreview }) {
   const [open, setOpen] = useState(false);
@@ -184,6 +268,7 @@ function OptionEditor({ option, index, depth, onChange, onRemove, onMoveUp, onMo
             <textarea value={option.announcement} onChange={e => set("announcement", e.target.value)} rows={2} style={S.textarea} />
             {onPreview && option.announcement && <button onClick={() => onPreview(option.announcement)} style={{ ...S.btnSm, marginTop: 4, fontSize: 10 }}>▶ Preview announcement</button>}
           </div>}
+          {hasFB && <TimeRuleEditor rules={option.timeRules || []} onChange={r => set("timeRules", r)} />}
           {hasFB && <FallbackChain fallbacks={option.fallbacks} onChange={f => set("fallbacks", f)} />}
           {(hasFB) && <div style={{ background: C.accentLt, border: `1px solid ${C.accentBd}`, borderRadius: 8, padding: "8px 10px", marginTop: 8 }}>
             <div style={{ fontSize: 10, fontWeight: 600, color: C.accent, marginBottom: 3 }}>WHISPER</div>

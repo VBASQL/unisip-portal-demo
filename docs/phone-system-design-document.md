@@ -140,6 +140,94 @@ Each menu option can be configured to ring differently based on context:
 
 Admin configures all forwarding targets per-extension in the directory. The IVR tree can also override forwarding per-option (e.g., Catskills sales line forwards to a specific summer mobile number regardless of the user's default).
 
+### Time-based routing rules
+
+Each IVR menu option that rings a destination (Extension, Ring group, Forward to number) supports an optional array of **time-based routing overrides**. When the current call time matches a rule, the rule's action replaces the option's default action entirely. If no rule matches, the default routing runs.
+
+**Rule fields:**
+
+| Field | Type | Description |
+|---|---|---|
+| `label` | string | Human-readable name, e.g. "After hours (weekdays)" |
+| `days` | int[] | Days of week: 0 = Sunday … 6 = Saturday |
+| `allDay` | bool | When true, the time range is ignored and the rule applies all day on the specified days |
+| `startTime` | "HH:MM" | Rule active from this time. Midnight-wrapping supported (e.g. 17:00–09:00 covers evening through morning) |
+| `endTime` | "HH:MM" | Rule active until this time |
+| `action` | string | Routing action during this window: `Forward to number`, `Voicemail`, `Ring extension`, `Ring group` |
+| `target` | string | Phone number or extension for the override action |
+| `targets` | string[] | Multiple targets when action is `Ring group` |
+
+**Evaluation order:** Rules are evaluated in list order. The first matching rule wins. The fallback chain (no-answer behavior) is unchanged by time rules — it still applies after the override action fails to connect.
+
+**Example config for "Accounts receivable" option:**
+
+```json
+{
+  "action": "extension",
+  "target": "201",
+  "timeRules": [
+    {
+      "label": "After hours (weekdays)",
+      "days": [1, 2, 3, 4],
+      "allDay": false,
+      "startTime": "17:00",
+      "endTime": "09:00",
+      "action": "Forward to number",
+      "target": "+19175551234"
+    },
+    {
+      "label": "Fri early close",
+      "days": [5],
+      "allDay": false,
+      "startTime": "13:00",
+      "endTime": "23:59",
+      "action": "Voicemail",
+      "target": ""
+    }
+  ],
+  "fallbacks": [
+    { "type": "Forward to number", "target": "+19175551234" },
+    { "type": "Voicemail", "target": "" }
+  ]
+}
+```
+
+**Twilio Function evaluation logic (gather-handler):**
+
+```javascript
+function matchTimeRule(rules, now) {
+  const day = now.getDay();                  // 0 = Sun … 6 = Sat
+  const hhmm = now.toTimeString().slice(0, 5); // "HH:MM"
+  for (const rule of rules || []) {
+    if (!rule.days.includes(day)) continue;
+    if (rule.allDay) return rule;
+    const { startTime, endTime } = rule;
+    const wraps = endTime < startTime;        // e.g. 17:00 → 09:00 wraps midnight
+    const inRange = wraps
+      ? (hhmm >= startTime || hhmm < endTime)
+      : (hhmm >= startTime && hhmm < endTime);
+    if (inRange) return rule;
+  }
+  return null;
+}
+
+// In gather-handler, before building the dial TwiML:
+const rule = matchTimeRule(option.timeRules, new Date());
+const effectiveAction = rule ? rule.action : option.action;
+const effectiveTarget = rule ? rule.target : option.target;
+```
+
+**Admin portal UI:**
+
+The IVR editor exposes a "Time-based routing overrides" panel inside each option that supports forwarding. Quick-add presets include:
+
+- **After hours (weekdays)** — Mon–Fri 17:00–09:00
+- **Fri early close** — Friday from 13:00 onward
+- **Weekends** — Saturday and Sunday, all day
+- **Business hours** — Mon–Fri 09:00–17:00
+
+Admins can also define custom rules by selecting any combination of days, a time range (or all day), and the override routing action. Rules are saved as part of the IVR tree JSON and take effect immediately on the next "Save & generate audio."
+
 ### Multiple menu modes
 
 The system supports separate menu trees that can be activated automatically or manually:
