@@ -359,22 +359,24 @@ Six API routes. That's the entire server. Deployed as a single container on Azur
 
 | Route | Auth | Purpose |
 |---|---|---|
-| `POST /api/auth/request` | None | Look up ext/number, send OTP via Twilio Verify |
+| `POST /api/auth/request` | None | Look up ext or phone number. If ext: call the extension via Twilio and read OTP aloud. If phone: send SMS OTP via Twilio Verify. |
 | `POST /api/auth/verify` | None | Check OTP, create session, set httpOnly cookie, return SAS |
 | `POST /api/auth/refresh` | JWT cookie | Verify session, return fresh 30-min SAS |
 | `POST /api/auth/logout` | JWT cookie | Delete server-side session, clear cookie |
-| `POST /api/tts/generate` | JWT cookie (admin) | Call OpenAI TTS, write MP3 + XML to blob |
+| `POST /api/tts/generate` | JWT cookie (admin) | Call OpenAI TTS, return audio for preview. On save, write MP3 + XML to blob. |
 | `POST /api/voice/token` | JWT cookie | Generate Twilio access token (for future WebRTC in-browser calling) |
 | `POST /api/notify/voicemail` | Twilio signature | Receive VM webhook, transcribe via Whisper, send email via SendGrid |
 | `GET /api/costs` | JWT cookie (admin) | Fetch Twilio Usage Records + Azure Cost Management + OpenAI log |
+| `GET /api/health` | None | Returns 200. Used by SPA heartbeat to keep Container App warm. |
 
 ### Deployment
 
 - Azure Container App, Consumption plan
 - Region: same as blob storage (e.g. East US)
 - Minimum replicas: 0 (scales to zero when idle)
-- Cold start: ~2–3 seconds (acceptable — user is waiting for OTP SMS)
-- SPA sends a `HEAD /api/health` heartbeat every 4 minutes to keep container warm during active sessions
+- Cold start: ~2–3 seconds on first request after idle. Acceptable because extension users are waiting for a voice call (takes a moment to connect anyway) and phone users are waiting for an SMS.
+- SPA sends a `HEAD /api/health` heartbeat every 4 minutes during active sessions to keep the container warm — all subsequent requests are instant
+- On tab close or logout, heartbeat stops, container eventually scales to zero
 - Cost: $0/month (well within free tier of 180,000 vCPU-seconds)
 
 ### Server-to-blob authentication
@@ -440,27 +442,49 @@ The dashboard shows: current month total, per-category breakdown, month-over-mon
 
 ### Admin-facing features
 
-**Extension manager**
-- Add, edit, reassign, deactivate extensions
-- Creates/updates Twilio credentials via API
-- Generates Zoiper QR provisioning codes per extension
-- Sets forwarded-to phone number per user
+**User management (phone-primary model)**
+- Every user has a phone number (required) — this is their identity for OTP login and where calls forward to
+- Extension is optional — only assigned to users with a SIP client (MicroSIP/Zoiper)
+- Users without an extension are "forward-only" — calls go directly to their phone number, no PBX involved
+- Only users with a SIP-registered extension can make outbound calls (`canCallOut` flag)
+- Admin can add a user with just a phone number first, then assign an extension later
+- Creates/updates Twilio SIP credentials via API when assigning extensions
+- Generates Zoiper QR provisioning codes per extension for zero-touch mobile setup
 
 **IVR menu editor**
-- Visual tree builder showing the menu hierarchy
-- Click any node to edit:
-  - Text field for the greeting prompt
-  - Voice picker (company default or override)
-  - Preview button (generates audio, plays in browser)
-  - Save button (writes MP3 + XML to blob, live immediately)
-- Add/remove/reorder menu options
-- Set timeout and fallback behavior (voicemail, operator, repeat)
 
-**User directory**
-- View all users, active and inactive
-- See extension history per user
-- Kill active sessions
-- Manage admin role assignments
+The IVR editor separates greeting tabs from menu options:
+
+*Greeting tabs* control only the intro text callers hear first. Menu options are shared across all greetings. Available greeting modes:
+- Main (business hours) — default, always active during configured hours
+- After hours — activates automatically based on business hours schedule
+- Yom Tov / Holiday — custom greetings with scheduling: set start date/time + expiry, or activate immediately. Reverts to main greeting when expired.
+- Custom — admin can add unlimited greeting tabs with their own schedules
+
+*On hold message* is a separate setting — not a greeting tab. Plays when a caller is waiting in queue or on hold during a transfer.
+
+*Menu options* are auto-numbered (1, 2, 3...) — admin just provides a label and selects an action type. The system auto-generates the "press 1 for orders, press 2 for shipping..." TTS prompt from the option labels. Admin never types "press X" manually.
+
+Action types per option:
+- **Extension (SIP)** — rings a registered SIP endpoint through the PBX
+- **Forward to number** — dials a phone number directly, no PBX involvement
+- **Ring group** — rings multiple destinations simultaneously (mix of extensions and phone numbers). First to answer gets the call, the rest stop ringing.
+- **Voicemail** — plays greeting and records a message (no ring attempt)
+- **Submenu** — plays a sub-intro and presents nested options (unlimited depth). Sub-options have the same action types, enabling multi-level menus.
+- **Announcement** — plays a message then returns to menu or hangs up
+
+*Fallback chains* — each option that rings something (extension, forward, ring group) has a configurable fallback chain. Admin builds sequences like: ring ext 101 → no answer → forward to +1 (555) 123-4567 → no answer → try +1 (555) 999-0000 → voicemail. Multiple fallback steps supported.
+
+*Whisper announcements* — when calls are forwarded to a phone number, the agent hears a brief spoken announcement before connecting (e.g. "Incoming orders call"). Caller hears normal ringing during this time. Configurable per option.
+
+*TTS preview* — every greeting, voicemail message, and announcement has a "Preview" button. Clicking it calls the OpenAI TTS API, generates audio, and plays it in the browser. Admin can listen, adjust text, preview again, then save. "Save & generate audio" generates ALL audio files for the current menu in one operation.
+
+**Conference calling**
+Between extension users only — handled entirely by the SIP client (MicroSIP/Zoiper). User presses Hold, dials another extension, presses Conference/Merge. Standard SIP behavior, Twilio handles media mixing. No IVR changes, no portal changes, no additional Twilio Functions needed.
+
+**Active sessions**
+- View all currently logged-in users
+- Kill any session instantly (invalidates JWT, SAS token stops refreshing)
 
 ### SPA keep-alive heartbeat
 

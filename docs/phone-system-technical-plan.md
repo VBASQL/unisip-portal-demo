@@ -1356,3 +1356,281 @@ twilio serverless:deploy --service-name yourcompany-pbx
 | Call log write fails | `call-status` logs error silently | No user impact (log gap) |
 | All Functions down | Twilio hits fallback URL | Caller hears apology + operator attempt |
 | SIP registration down | Calls go to no-answer path → voicemail | Caller leaves message |
+
+---
+
+## 9. Greeting Tabs and Scheduling
+
+### Greeting model (separate from menu options)
+
+Greeting tabs control only the intro text — what callers hear first. Menu options underneath are shared across all greetings. The IVR tree config stores greetings separately:
+
+```json
+{
+  "greetings": [
+    {
+      "id": "main",
+      "label": "Main (business hours)",
+      "text": "Thank you for calling UniSip...",
+      "audioFile": "/audio/ivr/greeting-main.mp3",
+      "schedule": { "type": "auto", "rule": "businessHours" }
+    },
+    {
+      "id": "after-hours",
+      "label": "After hours",
+      "text": "You have reached us after regular business hours...",
+      "audioFile": "/audio/ivr/greeting-after.mp3",
+      "schedule": { "type": "auto", "rule": "outsideBusinessHours" }
+    },
+    {
+      "id": "yomtov-shavuos",
+      "label": "Yom Tov — Shavuos",
+      "text": "Our offices are currently closed in observance of Shavuos...",
+      "audioFile": "/audio/ivr/greeting-shavuos.mp3",
+      "schedule": {
+        "type": "custom",
+        "startNow": false,
+        "start": "2026-06-01T00:00:00Z",
+        "end": "2026-06-04T18:00:00Z"
+      }
+    }
+  ],
+  "onHoldMessage": {
+    "text": "Thank you for calling UniSip. While you hold...",
+    "audioFile": "/audio/ivr/on-hold.mp3"
+  }
+}
+```
+
+### Greeting resolution at call time
+
+The `inbound-handler` Function resolves which greeting to play:
+
+1. Check for active custom-scheduled greetings (start ≤ now ≤ end, or startNow=true and not expired)
+2. If found, use that greeting
+3. If not, check business hours schedule
+4. If within hours, use main greeting; otherwise use after-hours greeting
+5. After the greeting audio, append auto-generated "press X for Y" from menu options
+
+### Auto-generated menu prompt
+
+The system generates the "press X for Y" portion from the options list. The TTS text for a complete greeting is:
+
+```
+{greeting.text}
+
+Press 1 for {options[0].label}, press 2 for {options[1].label}, ... or stay on the line for the operator.
+```
+
+This is generated at save time and baked into the TTS audio file. Options are auto-numbered — admin only provides labels.
+
+### On hold message
+
+Separate from IVR greetings. Played via `<Play>` inside `<Dial>` when a caller is waiting for someone to answer. Not part of the greeting tab system.
+
+---
+
+## 10. Phone-Primary User Model
+
+### User types
+
+Every user has a phone number. Extensions are optional.
+
+| User type | Phone | Extension | SIP Client | Outbound | Login method |
+|---|---|---|---|---|---|
+| Forward-only | ✅ required | ❌ none | ❌ none | ❌ cannot | Phone + SMS OTP |
+| Extension user | ✅ required | ✅ assigned | ✅ MicroSIP/Zoiper | ✅ can dial out | Ext + voice OTP |
+| Admin | ✅ required | ✅ optional | ✅ optional | ✅ if ext | Microsoft Entra |
+
+### Voice call OTP (extension login)
+
+When a user logs in via extension:
+
+1. Server receives `POST /api/auth/request` with `{ type: "ext", value: "101" }`
+2. Server looks up ext 101 in directory → finds user
+3. Server calls Twilio API to place a call to `sip:101@yourcompany.sip.us1.twilio.com`
+4. The call plays a TwiML `<Say>` with a 6-digit OTP: "Your verification code is: 4. 8. 2. 9. 1. 7."
+5. The user's MicroSIP/Zoiper rings, they pick up, hear the code
+6. They type the code into the portal login screen
+7. Server verifies → issues JWT + SAS token
+
+No SMS involved. The SIP client IS the second factor.
+
+### SMS OTP (phone login)
+
+When a user logs in via phone number:
+
+1. Server receives `POST /api/auth/request` with `{ type: "phone", value: "+15551234567" }`
+2. Server looks up that phone in directory → finds user
+3. Server sends OTP via Twilio Verify to that phone number
+4. User receives SMS, types code
+5. Server verifies → issues JWT + SAS token
+
+### Routing behavior per user type
+
+For **extension users** with a phone number, the IVR `<Dial>` rings both simultaneously:
+
+```xml
+<Dial>
+  <Sip>sip:101@yourcompany.sip.us1.twilio.com</Sip>
+  <Number url="/whisper?text=...">+15551234567</Number>
+</Dial>
+```
+
+For **forward-only users**, the IVR `<Dial>` goes directly to their phone:
+
+```xml
+<Dial>
+  <Number url="/whisper?text=...">+15551234567</Number>
+</Dial>
+```
+
+### Outbound calling
+
+Only extension users can make outbound calls. The `outbound-handler` Function checks the SIP credential against the directory and verifies `canCallOut: true` before routing to PSTN.
+
+---
+
+## 11. Ring Groups
+
+### Implementation
+
+A ring group rings multiple destinations simultaneously. Implemented as a `<Dial>` with multiple child elements — mix of `<Sip>` (extensions) and `<Number>` (phone numbers):
+
+```xml
+<Dial callerId="+15559876543" timeout="25"
+      action="/dial-status?group=sales-team">
+  <Sip>sip:101@yourcompany.sip.us1.twilio.com</Sip>
+  <Sip>sip:102@yourcompany.sip.us1.twilio.com</Sip>
+  <Number url="/whisper?text=Sales call">+15551234567</Number>
+</Dial>
+```
+
+First to answer gets the call. All other endpoints stop ringing. If no one answers within the timeout, the fallback chain activates (forward → voicemail, etc.).
+
+### Fallback chains
+
+Each IVR option stores an ordered list of fallback steps:
+
+```json
+{
+  "action": "ring-group",
+  "targets": ["101", "102"],
+  "fallbacks": [
+    { "type": "Forward to number", "target": "+15559990000" },
+    { "type": "Forward to number", "target": "+15558880000" },
+    { "type": "Voicemail", "target": "" }
+  ]
+}
+```
+
+The `dial-status` Function processes fallbacks sequentially — on no-answer, tries the next step. Multiple forward numbers can be chained before reaching voicemail.
+
+---
+
+## 12. Conference Calling
+
+Conference calling is between extension users only — handled entirely by the SIP client (MicroSIP / Zoiper). No additional Twilio Functions or IVR changes required.
+
+### How it works
+
+1. User A (ext 101) is on a call with User B (ext 102)
+2. User A presses "Hold" on their SIP client
+3. User A dials ext 103
+4. User A presses "Conference" or "Merge" on their SIP client
+5. Twilio handles the media mixing — all three hear each other
+6. Additional participants can be added the same way
+
+This is standard SIP behavior. Twilio's SIP infrastructure supports it natively when the SIP client sends the appropriate conference/merge SIP headers.
+
+---
+
+## 13. Cost Dashboard API
+
+### Data sources
+
+The `GET /api/costs` endpoint aggregates costs from three sources:
+
+**Twilio** — via `GET /2010-04-01/Accounts/{AccountSid}/Usage/Records/ThisMonth.json`:
+- Phone number leases
+- Inbound call minutes
+- Outbound call minutes
+- SIP-to-SIP (internal) minutes
+- Recording minutes (voicemail)
+- Twilio Verify verifications
+- SendGrid emails (free tier)
+
+**Azure** — via Azure Cost Management REST API or Azure Consumption API:
+- Blob Storage capacity + operations
+- Container App vCPU-seconds and GiB-seconds (usually $0 — free tier)
+- Static Web Apps (free tier)
+- Bandwidth egress
+
+**OpenAI** — tracked by the server in `/config/cost-log.json`:
+- TTS generations: character count × rate
+- Whisper transcriptions: audio minutes × rate
+- Each API call logged with timestamp, character/minute count, and cost
+
+### Response format
+
+```json
+{
+  "month": "2026-05",
+  "total": 34.72,
+  "twilio": {
+    "subtotal": 25.73,
+    "items": [
+      { "category": "Phone numbers", "quantity": 2, "unit": "numbers", "rate": 1.00, "cost": 2.00 },
+      { "category": "Inbound calls", "quantity": 1247, "unit": "minutes", "rate": 0.0085, "cost": 10.60 }
+    ]
+  },
+  "azure": {
+    "subtotal": 2.18,
+    "items": [
+      { "category": "Blob Storage", "usage": "2.4 GB", "tier": "Pay-as-you-go", "cost": 2.18 },
+      { "category": "Container App", "usage": "4200 vCPU-sec", "tier": "Free tier", "cost": 0.00 }
+    ]
+  },
+  "openai": {
+    "subtotal": 0.33,
+    "items": [
+      { "category": "TTS (greetings)", "usage": "4520 chars", "rate": "15/1M chars", "cost": 0.07 },
+      { "category": "Whisper (VM)", "usage": "44 min", "rate": "0.006/min", "cost": 0.26 }
+    ]
+  }
+}
+```
+
+---
+
+## 14. TTS Preview Workflow
+
+### Per-message preview
+
+Every editable text in the IVR editor (greeting, submenu intro, voicemail greeting, announcement, whisper) has a Preview button. Flow:
+
+1. Admin clicks "Preview" next to a text field
+2. SPA calls `POST /api/tts/generate` with `{ text: "...", voice: "alloy", preview: true }`
+3. Server calls OpenAI TTS API → receives MP3 audio bytes
+4. Server returns audio as base64 or streaming response
+5. SPA plays audio in browser using Web Audio API
+6. Admin listens, edits text if needed, previews again
+
+### Full menu save
+
+When admin clicks "Save & generate audio":
+
+1. SPA collects all text fields: active greeting intro, auto-generated "press X" prompt, all voicemail greetings, all announcements, all sub-menu intros
+2. Sends all texts to `POST /api/tts/generate` with `{ texts: [...], voice: "alloy", preview: false }`
+3. Server generates each audio file via OpenAI TTS
+4. Server writes each MP3 to blob at the appropriate path
+5. Server generates TwiML XML files referencing the new audio URLs
+6. Server writes XML to blob
+7. Returns success — changes are live immediately for the next caller
+
+### Audio format
+
+- Format: MP3
+- Sample rate: 16kHz (phone quality — higher is wasted)
+- Bitrate: 32kbps mono
+- Model: `tts-1` (faster, cheaper — `tts-1-hd` not needed for phone audio)
